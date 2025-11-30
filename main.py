@@ -1,4 +1,3 @@
-# main.py
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -233,3 +232,174 @@ def elder_advice_agent(request: AgentRequest):
             data=None,
             error_message=str(e),
         )
+
+# ---------------------------------------------------------
+# Demo / prototype endpoints for WBS features
+# ---------------------------------------------------------
+
+from audit_log import audit_logger
+from rule_engine import rule_engine_reply
+from reminder_service import reminder_service, ReminderCreate, ReminderOut
+from checkin_service import checkin_service, CheckInPrefsIn, CheckInStatusOut
+from calendar_service import calendar_service, CalendarEventCreate, CalendarEventOut
+from notifications_service import notifications_service, NotificationIn
+from profiles_consent_service import (
+    profiles_store,
+    ProfileCreate,
+    ConsentGrantIn,
+    ProfileViewOut,
+)
+
+
+class ReminderActionIn(BaseModel):
+    actor: str
+    minutes: Optional[int] = None
+
+
+# ---------- Rule engine demo ----------
+
+@app.post("/demo/rule-engine", response_model=AgentResponse)
+def demo_rule_engine(request: AgentRequest):
+    user_text = get_last_user_message(request)
+    rule_reply = rule_engine_reply(user_text)
+    if rule_reply is None:
+        message = (
+            "No rule matched in the prototype rule engine. In the real system, "
+            "this is where we fall back to the LLM-based core."
+        )
+    else:
+        message = rule_reply
+
+    return AgentResponse(
+        agent_name=AGENT_NAME,
+        status=Status.SUCCESS,
+        data={"message": message},
+        error_message=None,
+    )
+
+
+# ---------- Reminder service demo ----------
+
+@app.post("/demo/reminders", response_model=ReminderOut)
+def demo_create_reminder(data: ReminderCreate):
+    rem = reminder_service.create(data)
+    return ReminderOut(**rem.__dict__)
+
+
+@app.get("/demo/reminders/{user_id}", response_model=List[ReminderOut])
+def demo_list_reminders(user_id: str):
+    rems = reminder_service.list_for_user(user_id)
+    return [ReminderOut(**r.__dict__) for r in rems]
+
+
+@app.post("/demo/reminders/{reminder_id}/confirm")
+def demo_confirm_reminder(reminder_id: int, body: ReminderActionIn):
+    reminder_service.confirm(reminder_id, actor=body.actor)
+    return {"ok": True}
+
+
+@app.post("/demo/reminders/{reminder_id}/snooze")
+def demo_snooze_reminder(reminder_id: int, body: ReminderActionIn):
+    minutes = body.minutes if body.minutes is not None else 10
+    reminder_service.snooze(reminder_id, minutes=minutes, actor=body.actor)
+    return {"ok": True}
+
+
+# ---------- Check-in & escalation demo ----------
+
+@app.post("/demo/checkin/prefs")
+def demo_set_checkin_prefs(data: CheckInPrefsIn):
+    checkin_service.set_prefs(data)
+    return {"ok": True}
+
+
+@app.post("/demo/checkin/{user_id}/prompt")
+def demo_send_checkin_prompt(user_id: str):
+    checkin_service.send_prompt(user_id)
+    return {"ok": True}
+
+
+@app.post("/demo/checkin/{user_id}/response")
+def demo_record_checkin_response(user_id: str):
+    checkin_service.record_response(user_id)
+    return {"ok": True}
+
+
+@app.get("/demo/checkin/{user_id}/status", response_model=CheckInStatusOut)
+def demo_checkin_status(user_id: str):
+    return checkin_service.evaluate_escalation(user_id)
+
+
+# ---------- Calendar integration demo ----------
+
+@app.post("/demo/calendar", response_model=CalendarEventOut)
+def demo_create_calendar_event(data: CalendarEventCreate):
+    ev = calendar_service.create(data)
+    return CalendarEventOut(**ev.__dict__)
+
+
+@app.get("/demo/calendar/{user_id}", response_model=List[CalendarEventOut])
+def demo_list_calendar_events(user_id: str):
+    events = calendar_service.list_for_user(user_id)
+    return [CalendarEventOut(**e.__dict__) for e in events]
+
+
+# ---------- Notifications demo ----------
+
+@app.post("/demo/notify")
+def demo_send_notification(data: NotificationIn):
+    notifications_service.send(data)
+    return {"ok": True, "sent_count": len(notifications_service.sent)}
+
+
+# ---------- Profiles & consent demo ----------
+
+@app.post("/demo/profiles")
+def demo_create_profile(data: ProfileCreate):
+    profiles_store.add_profile(data)
+    return {"ok": True}
+
+
+@app.post("/demo/consent")
+def demo_grant_consent(data: ConsentGrantIn):
+    profiles_store.grant_consent(data)
+    return {"ok": True}
+
+
+@app.get("/demo/profiles/{user_id}/view/{role}", response_model=ProfileViewOut)
+def demo_view_profile(user_id: str, role: str):
+    return profiles_store.view_profile(user_id=user_id, role=role)
+
+
+# ---------- Caregiver dashboard + audit log (JSON only) ----------
+
+@app.get("/demo/caregiver-dashboard")
+def demo_caregiver_dashboard(caregiver_id: str = "caregiver-1"):
+    elder_id = "elder-1"
+    state = checkin_service.state.get(elder_id) if hasattr(checkin_service, "state") else None
+
+    latest_checkin = {
+        "last_prompt": state.last_prompt.isoformat() if state and state.last_prompt else None,
+        "last_response": state.last_response.isoformat() if state and state.last_response else None,
+        "escalation_needed": any(
+            elder_id in esc for esc in getattr(checkin_service, "escalations", [])
+        ),
+    }
+
+    dashboard = {
+        "caregiver_id": caregiver_id,
+        "elders": [
+            {
+                "user_id": elder_id,
+                "latest_checkin": latest_checkin,
+                "reminders": [r.__dict__ for r in reminder_service.list_for_user(elder_id)],
+            }
+        ],
+        "escalations": getattr(checkin_service, "escalations", []),
+    }
+    return dashboard
+
+
+@app.get("/demo/audit-log")
+def demo_audit_log():
+    return {"entries": audit_logger.list_entries()}
